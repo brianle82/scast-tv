@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<!--
+  What: SCAST TV receiver page (Google Cast custom receiver, App ID A5EBD549).
+  Contains: branded idle screen, CAF default player (video / HLS mirror), short
+    localized messages (7 languages), live "mirroring" badge, stall + error notice,
+    auto-stop when the phone is gone. ?demo previews it in a normal browser.
+  Relations: lib/core/config/cast_ids.dart (App ID, namespace); the phone sends
+    {"type":"language","code":"vi"} on urn:x-cast:com.brianle.scast.
+  Rules: Chrome 92 safe (old TV boxes): ES5 only, no optional chaining, no
+    aspect-ratio / inset, no WebAudio. No analytics, no network call except the
+    Cast SDK script and the media URL the phone sends.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SCAST</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: #0B1220; overflow: hidden;
+    font-family: Roboto, Arial, Helvetica, sans-serif; color: #F1F5F9; }
+  cast-media-player { position: absolute; top: 0; left: 0; right: 0; bottom: 0; --splash-image: none; }
+  .screen { position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: none;
+    align-items: center; justify-content: center; flex-direction: column; text-align: center; }
+  .screen.on { display: flex; }
+  #idle { background: #0B1220; z-index: 10; }
+  #idle svg { width: 220px; height: 220px; }
+  #idle h1 { margin: 12px 0 0; font-size: 72px; letter-spacing: 8px; font-weight: 700; }
+  #idle p { margin: 28px 60px 0; font-size: 34px; color: #94A3B8; max-width: 1100px; line-height: 1.4; }
+  #note { z-index: 20; background: rgba(11, 18, 32, 0.82); }
+  #note p { margin: 0 80px; font-size: 44px; line-height: 1.4; max-width: 1200px; }
+  #note.error p { color: #FCA5A5; }
+  #badge { position: absolute; top: 36px; left: 48px; z-index: 30; display: none; padding: 10px 22px;
+    border-radius: 999px; background: rgba(34, 195, 166, 0.92); color: #0B1220; font-size: 28px; font-weight: 700; }
+  #badge.on { display: block; }
+  #demo { position: absolute; top: 8px; right: 8px; z-index: 99; display: none; font-size: 14px; }
+  #demo a { color: #3D8BFF; margin-left: 8px; cursor: pointer; }
+</style>
+<script src="https://www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+</head>
+<body>
+<cast-media-player id="player"></cast-media-player>
+
+<div id="idle" class="screen on">
+  <svg viewBox="0 0 128 128" aria-hidden="true">
+    <path d="M24 46 L24 32 C24 27.6 27.6 24 32 24 L96 24 C100.4 24 104 27.6 104 32 L104 85 C104 89.4 100.4 93 96 93 L82 93" fill="none" stroke="#3D8BFF" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M24 66 C43.3 66 59 81.7 59 101" fill="none" stroke="#22C3A6" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M24 83 C33.9 83 42 91.1 42 101" fill="none" stroke="#22C3A6" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M56 43 L81 58.5 L56 74 Z" fill="#F1F5F9"/>
+    <circle cx="24" cy="101" r="4.5" fill="#22C3A6"/>
+  </svg>
+  <h1>SCAST</h1>
+  <p id="idle-text"></p>
+</div>
+<div id="note" class="screen"><p id="note-text"></p></div>
+<div id="badge"></div>
+<div id="demo">demo:
+  <a onclick="demo('idle')">idle</a><a onclick="demo('starting')">starting</a><a onclick="demo('live')">live</a>
+  <a onclick="demo('stalled')">stalled</a><a onclick="demo('error')">error</a>
+</div>
+
+<script>
+(function () {
+  // ---- strings: key -> {language code -> text}. English is the fallback. ----
+  var T = {
+    waiting: {
+      en: 'Ready. Choose this TV in SCAST on your phone.',
+      vi: 'Sẵn sàng. Chọn tivi này trong SCAST trên điện thoại.',
+      es: 'Listo. Elige este televisor en SCAST en tu teléfono.',
+      fr: 'Prêt. Choisissez ce téléviseur dans SCAST sur votre téléphone.',
+      pt: 'Pronto. Escolha esta TV no SCAST do seu telefone.',
+      id: 'Siap. Pilih TV ini di SCAST pada ponsel Anda.',
+      fil: 'Handa na. Piliin ang TV na ito sa SCAST sa iyong telepono.'
+    },
+    starting: {
+      en: 'Starting…', vi: 'Đang bắt đầu…', es: 'Iniciando…', fr: 'Démarrage…',
+      pt: 'Iniciando…', id: 'Memulai…', fil: 'Sinisimulan…'
+    },
+    live: {
+      en: 'Mirroring your phone', vi: 'Đang chiếu màn hình điện thoại', es: 'Duplicando tu teléfono',
+      fr: 'Recopie de votre téléphone', pt: 'Espelhando seu telefone',
+      id: 'Mencerminkan ponsel Anda', fil: 'Ini-mirror ang iyong telepono'
+    },
+    stalled: {
+      en: 'No picture from your phone. Keep SCAST open and the phone screen on.',
+      vi: 'Chưa nhận được hình từ điện thoại. Hãy giữ SCAST mở và màn hình điện thoại sáng.',
+      es: 'No llega imagen de tu teléfono. Mantén SCAST abierto y la pantalla encendida.',
+      fr: 'Aucune image du téléphone. Gardez SCAST ouvert et l’écran allumé.',
+      pt: 'Sem imagem do telefone. Mantenha o SCAST aberto e a tela ligada.',
+      id: 'Tidak ada gambar dari ponsel. Biarkan SCAST terbuka dan layar tetap menyala.',
+      fil: 'Walang larawan mula sa telepono. Panatilihing bukas ang SCAST at bukas ang screen.'
+    },
+    error: {
+      en: 'This could not be played on the TV. Try again from your phone.',
+      vi: 'Không phát được trên tivi. Hãy thử lại từ điện thoại.',
+      es: 'No se pudo reproducir en el televisor. Inténtalo de nuevo desde tu teléfono.',
+      fr: 'Lecture impossible sur le téléviseur. Réessayez depuis votre téléphone.',
+      pt: 'Não foi possível reproduzir na TV. Tente de novo pelo telefone.',
+      id: 'Tidak dapat diputar di TV. Coba lagi dari ponsel Anda.',
+      fil: 'Hindi ito mapapatugtog sa TV. Subukan muli mula sa iyong telepono.'
+    }
+  };
+  var lang = 'en';
+  var lastNote = '';   // which note is showing: '', 'starting', 'stalled', 'error'
+  var isLive = false;
+  var stallTimer = null;
+
+  function tr(key) { var m = T[key]; return m[lang] || m.en; }
+  function $(id) { return document.getElementById(id); }
+
+  function setLang(code) {
+    if (!code) { return; }
+    code = String(code).toLowerCase().split('-')[0];
+    lang = T.waiting[code] ? code : 'en';
+    document.documentElement.lang = lang;
+    $('idle-text').textContent = tr('waiting');
+    $('badge').textContent = tr('live');
+    if (lastNote) { showNote(lastNote); }
+  }
+  function showNote(kind) {
+    lastNote = kind;
+    $('note-text').textContent = tr(kind);
+    $('note').className = 'screen on' + (kind === 'error' ? ' error' : '');
+  }
+  function hideNote() { lastNote = ''; $('note').className = 'screen'; }
+  function showIdle(on) { $('idle').className = on ? 'screen on' : 'screen'; }
+  function showBadge(on) { $('badge').className = on ? 'on' : ''; }
+  function clearStall() { if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; } }
+  function resetToIdle() {
+    clearStall(); hideNote(); showBadge(false); isLive = false; showIdle(true);
+  }
+
+  setLang('en');
+
+  // ---- demo mode: open index.html?demo&lang=vi in a normal browser ----
+  var qs = window.location.search;
+  var demoMode = qs.indexOf('demo') >= 0 || typeof cast === 'undefined' || !cast.framework;
+  window.demo = function (state) {
+    resetToIdle();
+    if (state === 'idle') { return; }
+    showIdle(false);
+    if (state === 'starting') { showNote('starting'); }
+    if (state === 'live') { showBadge(true); }
+    if (state === 'stalled') { showBadge(true); showNote('stalled'); }
+    if (state === 'error') { showNote('error'); }
+  };
+  if (demoMode) {
+    var m = /[?&]lang=([a-zA-Z-]+)/.exec(qs);
+    if (m) { setLang(m[1]); }
+    $('demo').style.display = 'block';
+    return;
+  }
+
+  // ---- real receiver ----
+  var ctx = cast.framework.CastReceiverContext.getInstance();
+  var pm = ctx.getPlayerManager();
+  var EV = cast.framework.events.EventType;
+  var options = new cast.framework.CastReceiverOptions();
+  options.disableIdleTimeout = true;   // the phone ends the session; we also stop below
+  options.maxInactivity = 86400;
+
+  pm.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, function (req) {
+    var media = req.media;
+    isLive = !!(media && media.streamType === 'LIVE');
+    clearStall(); hideNote(); showBadge(isLive);
+    showIdle(false);
+    showNote('starting');
+    return req;
+  });
+
+  pm.addEventListener(EV.PLAYING, function () {
+    clearStall(); hideNote(); showIdle(false); showBadge(isLive);
+  });
+  pm.addEventListener(EV.BUFFERING, function (e) {
+    // Mirror only: if frames stop for 8 s, say why instead of a frozen picture.
+    if (!isLive) { return; }
+    clearStall();
+    if (e && e.isBuffering) {
+      stallTimer = setTimeout(function () { showNote('stalled'); }, 8000);
+    }
+  });
+  pm.addEventListener(EV.ERROR, function () { clearStall(); showNote('error'); });
+  pm.addEventListener(EV.MEDIA_FINISHED, function () {
+    // A new LOAD can arrive just after the old one ends: wait before showing idle.
+    setTimeout(function () {
+      var st = pm.getPlayerState && pm.getPlayerState();
+      if (st !== 'PLAYING' && st !== 'BUFFERING' && st !== 'LOADING') { resetToIdle(); }
+    }, 4000);
+  });
+
+  ctx.addCustomMessageListener('urn:x-cast:com.brianle.scast', function (ev) {
+    try {
+      var d = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+      if (d && d.type === 'language') { setLang(d.code); }
+    } catch (e) { /* ignore a malformed message */ }
+  });
+
+  // Phone swiped away or lost Wi-Fi: after 5 s with no sender, end the session.
+  var goneTimer = null;
+  ctx.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, function () {
+    if (goneTimer) { clearTimeout(goneTimer); }
+    goneTimer = setTimeout(function () {
+      if (ctx.getSenders().length === 0) { ctx.stop(); }
+    }, 5000);
+  });
+  ctx.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function () {
+    if (goneTimer) { clearTimeout(goneTimer); goneTimer = null; }
+  });
+
+  ctx.start(options);
+})();
+</script>
+</body>
+</html>
